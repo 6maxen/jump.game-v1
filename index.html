@@ -1,12 +1,5 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="darkreader-lock">
-</head>
-<body>
-<title>jump game!</title>
+<title>Skyline Swing</title>
 <style>
   :root{
     --bg:#f2f2f0;
@@ -308,7 +301,7 @@
     if (spawnDoor) b0.door = true;
     player = {
       x: b0.x + b0.w * 0.5, y: b0.top - RADIUS,
-      rx: 0, ry: 0, vx: 0, vy: 0, grounded: true, airJumps: 1, airCutDir: 0,
+      rx: 0, ry: 0, vx: 0, vy: 0, grounded: true, jumps: 0, airCutDir: 0,
       rechargeT: 0, blinkT: 0
     };
     player.rx = player.x; player.ry = player.y;
@@ -389,12 +382,17 @@
     cam.x = player.x; cam.y = player.y - 60; cam.lead = 0; cam.limitV = player.y + 120;
   }
 
-  function groundJump() {
+  // One budget of jumps per airborne period, spent by presses. Leaving the
+  // ground by walking off an edge costs nothing, so the first press in the air
+  // is always an ordinary jump no matter how long you have been falling; only
+  // a second press is the double.
+  function groundHop() {
+    player.jumps = 1;
     player.vy = -JUMP;
     player.grounded = false;
-    player.airJumps = 1;
   }
-  var COYOTE = 7;    // within this of a landable surface, a jump is a ground jump
+  var COYOTE = 7;           // this close to a surface below, a jump is refunded
+  var MAX_JUMPS = 2;        // presses available between landings
   var RECHARGE = 4;  // seconds before a spent air jump comes back on its own
   // the line lets go this far round the arc, measured from hanging straight
   // down. 90 would be level with the anchor; 85 cuts it just short of that.
@@ -420,12 +418,15 @@
   }
 
   function jumpPressed() {
-    // close enough to a surface and it does not cost the air jump
-    if (player.grounded || surfaceBelow()) groundJump();
-    else if (player.airJumps > 0) {
-      player.airJumps--;
-      player.rechargeT = 0;
-      player.vy = -JUMP;
+    // touching down, or about to, refunds the budget
+    if (player.grounded || surfaceBelow()) { groundHop(); return; }
+    if (player.jumps >= MAX_JUMPS) return;
+    player.jumps++;
+    player.rechargeT = 0;
+    player.vy = -JUMP;
+    player.grounded = false;
+    // only the second press in the air is the double, so only it gets a ring
+    if (player.jumps >= MAX_JUMPS) {
       puffs.push({ x: player.x, y: player.y, t: 0, life: 0.38 });
     }
   }
@@ -442,7 +443,7 @@
     if (pointer.down && !rope.on && !lockGrapple) tryGrapple();
 
     // holding space re-jumps on every landing, and never spends the air jump
-    if (keys[" "] && p.grounded) groundJump();
+    if (keys[" "] && p.grounded) groundHop();
 
     if (rope.on) {
       if (keys.w || keys.arrowup) {
@@ -554,7 +555,7 @@
             var b = list[i];
             if (p.x + RADIUS > b.x && p.x - RADIUS < b.x + b.w &&
                 py0 + RADIUS <= b.top + 1 && p.y + RADIUS >= b.top) {
-              p.y = b.top - RADIUS; p.vy = 0; p.grounded = true; p.airJumps = 1;
+              p.y = b.top - RADIUS; p.vy = 0; p.grounded = true; p.jumps = 0;
               landedOn = li;
               if (b.door && Math.abs(p.x - (b.x + b.w / 2)) < 24) onDoor = true;
               break;
@@ -563,7 +564,7 @@
         }
         if (landedOn < 0 && !rope.on && !dropping &&
             py0 + RADIUS <= L.baseY + 1 && p.y + RADIUS >= L.baseY) {
-          p.y = L.baseY - RADIUS; p.vy = 0; p.grounded = true; p.airJumps = 1;
+          p.y = L.baseY - RADIUS; p.vy = 0; p.grounded = true; p.jumps = 0;
           landedOn = li;
         }
       }
@@ -587,10 +588,10 @@
       doorLock = false;
     }
 
-    // a spent air jump comes back on its own, with a blink to announce it
-    if (p.airJumps <= 0) {
+    // a spent jump comes back on its own, with a blink to announce it
+    if (p.jumps >= MAX_JUMPS) {
       p.rechargeT += dt;
-      if (p.rechargeT >= RECHARGE) { p.airJumps = 1; p.rechargeT = 0; p.blinkT = 0.7; }
+      if (p.rechargeT >= RECHARGE) { p.jumps = MAX_JUMPS - 1; p.rechargeT = 0; p.blinkT = 0.7; }
     }
     if (p.blinkT > 0) p.blinkT -= dt;
 
@@ -704,7 +705,7 @@
     // white while S is held. Those two together used to be a white fill under
     // a white outline — invisible — so a spent jump keeps a tinted body while
     // dropping, and a chevron under the dot marks drop mode either way.
-    var full = player.airJumps > 0;
+    var full = player.jumps < MAX_JUMPS;
     if (player.blinkT > 0) full = Math.floor(player.blinkT * 12) % 2 === 0;
     var dropping = !!keys.s;
 
@@ -840,6 +841,3 @@
   requestAnimationFrame(frame);
 })();
 </script>
-
-</body>
-</html>
