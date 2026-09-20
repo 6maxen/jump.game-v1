@@ -1,4 +1,11 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="darkreader-lock">
+</head>
+<body>
 <title>jump game!</title>
 <style>
   :root{
@@ -73,7 +80,7 @@
 <div id="big" hidden><span class="k" id="bigK"></span><span class="v" id="bigV"></span></div>
 <div id="hud">dist 0m</div>
 <div id="ach" hidden><b>achievement unlocked: backrooms</b><small>R to restart</small></div>
-<div id="keys">mouse = grapple, space = (double) jump, W = reel in, S = phase, A/D = move, R = restart</div>
+<div id="keys">mouse = grapple, space = (double) jump / hold to land, W = reel in, A/D = move, R = restart</div>
 
 <script>
 (function () {
@@ -101,7 +108,9 @@
   var TIPS = [
     "press space to jump",
     "tip: use your mouse to grapple buildings!",
-    "tip: hold 'S' to turn off ground/building collisions.",
+    "tip: with your double jump spent you fall through everything.",
+    "tip: hold space to brace and land, even with the jump spent.",
+    "tip: a snapped rope swings loose, then drops — go and pick it up.",
     "tip: double jump to reach higher places"
   ];
   var tipIndex = 0;
@@ -150,8 +159,15 @@
   // on foot: hard shove off the mark, easing as you approach the cap, but
   // never weaker than RUN_ACCEL_MIN so it always feels responsive
   var RUN_MAX = 700, RUN_ACCEL_MAX = 2600, RUN_ACCEL_MIN = 800;
-  var PHASE_SPEED = 2000;      // above this you pass through roofs and streets
-  var BACKROOMS_FALL = 700;    // metres of altitude lost per second before it all stops
+  // Nothing is solid while the double jump is spent — the hollow, blue-ringed
+  // state. Getting the jump back makes the world solid again, so a long fall
+  // ends itself: the recharge lands you.
+  // Falling clean through three whole levels inside BACKROOMS_WINDOW seconds
+  // means you have dropped out of the city rather than travelled down it.
+  var BACKROOMS_DROP = 3;
+  var BACKROOMS_WINDOW = 2;
+  var runT = 0;
+  var depthHist = [];
 
   var DOOR_AT = 67;         // a door stands on every sixty-seventh building
   var DOOR_HOLD = 1;        // seconds of standing on it before it opens
@@ -160,11 +176,9 @@
   var THEMES = {
     light: { bg: "#f2f2f0", fill: "#c9c9c6", edge: "#8f8f8b", ink: "#16161a",
              rope: "#d0392b", dot: "#1f5fd0", dotEdge: "#16161a",
-             drop: "#8fb0e8", dropEdge: "#ffffff",
              dim: "#5c5c58", veil: "rgba(242,242,240,.82)" },
     dark:  { bg: "#121218", fill: "#26262f", edge: "#4e4e60", ink: "#eceaf4",
              rope: "#ff7a63", dot: "#5aa9ff", dotEdge: "#0a0a10",
-             drop: "#2d5b9e", dropEdge: "#ffffff",
              dim: "#8b8b9c", veil: "rgba(18,18,24,.82)" }
   };
   var theme = THEMES.light;
@@ -284,6 +298,36 @@
   var pointer = { down: false, x: 0, y: 0 };
   var drawX = 0, drawY = 0;
   var puffs = [];                      // expanding rings marking each air jump
+
+  // The rope is a physical object. While you hold it you can grapple; once a
+  // line detaches, the half still tied to the building swings as a free
+  // pendulum, loses energy, drops, and lies on a surface until you collect it.
+  var hasRope = true;
+  var loose = null;                    // { phase, ... } while the rope is away
+  var PICKUP = 22;                     // how close you must be to collect it
+  var ANCHOR_REACH = 40;               // how near a roof the anchor must sit
+  var GRAPPLE_GAP = 0.5;               // fire again inside this and it counts as spam
+  var BREAK_CHANCE = 0.45;             // a spammed line has this chance of parting
+  var ropeUses = 0;                    // grapples fired since the run began
+  var lastGrappleT = -99;              // when the previous one went out
+  var ropeSafe = false;                // a recovered rope never breaks again
+  var SWING_DAMP = 0.55;               // energy the free pendulum loses per second
+  var SWING_MIN = 3 * Math.PI / 180;   // once the arc is this small, it drops
+  var SNAP_MAX_SPEED = 1000;           // too fast to snap: the line holds
+  var SNAP_MIN_CLEAR = 400;            // and it needs this much air beneath you
+
+  // How far the player is above the street below them. Deliberately measured
+  // to street level and not to the rooftops: the break angle is crossed low in
+  // the arc, where clearance to a roof is tiny, so testing against roofs would
+  // block essentially every snap.
+  function clearanceBelow() {
+    var p = player, best = null;
+    for (var li = 0; li < levels.length; li++) {
+      var L = levels[li];
+      if (L.baseY >= p.y && (best === null || L.baseY < best)) best = L.baseY;
+    }
+    return best === null ? Infinity : best - p.y;
+  }
   var lockGrapple = false;             // set when a line breaks itself mid-hold
 
   // builds three stacked maps and stands the player on the middle one
@@ -319,8 +363,15 @@
     elTip.textContent = TIPS[0];
     elTitle.classList.remove("gone");
     buildWorld(true, false);
-    rope = { on: false, x: 0, y: 0, len: 0, armed: false, dir: 0 };
+    rope = { on: false, x: 0, y: 0, len: 0, armed: false, rose: false, tested: false, dir: 0 };
     puffs = [];
+    hasRope = true;
+    loose = null;
+    ropeUses = 0;
+    ropeSafe = false;
+    lastGrappleT = -99;
+    runT = 0;
+    depthHist = [];
     lockGrapple = false;
     cam = { x: player.x, y: player.y - 60, zoom: 1, lead: 0, limitV: GROUND_Y + 120 };
     stats = { startX: player.x, far: 0, high: 0, low: 0 };
@@ -328,7 +379,7 @@
 
   // ---- grapple: passes through everything, but must land on a building ----
   function tryGrapple() {
-    if (!pointer.down) return false;
+    if (!pointer.down || !hasRope) return false;
     var wp = screenToWorld(pointer.x, pointer.y);
     var dx = wp.x - player.x, dy = wp.y - player.y;
     var d = Math.hypot(dx, dy);
@@ -357,13 +408,165 @@
     if (!found) return false;
 
     rope.on = true; rope.x = bx; rope.y = by;
+    ropeUses++;
+    // Firing again within GRAPPLE_GAP is spamming the line, and a spammed line
+    // may part on the spot. The speed and clearance rails still apply, so it
+    // never breaks somewhere that would strand you.
+    var spam = (runT - lastGrappleT) < GRAPPLE_GAP;
+    lastGrappleT = runT;
+    // A line spends the ordinary jump but never gives anything back: whatever
+    // you press after grappling is the double, and if the double is already
+    // gone it stays gone until you land.
+    player.jumps = Math.max(player.jumps, MAX_JUMPS - 1);
     rope.armed = false;           // arms once you are hanging well below it
+    rope.tested = false;          // each arc gets one chance to snap
+    rope.rose = false;            // set once the forward arc is climbing
     rope.dir = player.vx > 0 ? 1 : (player.vx < 0 ? -1 : 0);
     rope.len = clamp(Math.hypot(player.x - bx, player.y - by), MIN_ROPE, MAX_ROPE);
+    if (spam && breakAllowed() && Math.random() < BREAK_CHANCE) {
+      snapRope();
+      lockGrapple = true;
+    }
     return true;
   }
 
+  // the rails that keep a break from stranding you: never at speed, never low
+  function breakAllowed() {
+    if (ropeSafe) return false;
+    return Math.hypot(player.vx, player.vy) <= SNAP_MAX_SPEED &&
+           clearanceBelow() > SNAP_MIN_CLEAR;
+  }
+
+  // Letting go on purpose costs nothing: the line comes back with you.
   function release() { rope.on = false; }
+
+  // Snapping is the expensive one — the line parts and stays behind.
+  function snapRope() {
+    if (!rope.on) return;
+    rope.on = false;
+    // the line snaps: the building keeps half of it
+    var dx = player.x - rope.x, dy = player.y - rope.y;
+    var L = Math.max(MIN_ROPE, Math.hypot(dx, dy) * 0.5);
+    var th = Math.atan2(dx, dy);       // measured from hanging straight down
+    loose = {
+      phase: "swing",
+      ax: rope.x, ay: rope.y, len: L,
+      th: th,
+      // carry the tangential part of your velocity into the pendulum
+      av: (player.vx * Math.cos(th) - player.vy * Math.sin(th)) / L,
+      // the snapped rope starts exactly where you are, so it cannot be
+      // collected until you have actually moved clear of it once
+      free: false,
+      x: 0, y: 0, py: 0, vx: 0, vy: 0
+    };
+    hasRope = false;
+  }
+
+  function looseTip() {
+    if (!loose) return null;
+    if (loose.phase === "swing") {
+      return { x: loose.ax + Math.sin(loose.th) * loose.len,
+               y: loose.ay + Math.cos(loose.th) * loose.len };
+    }
+    return { x: loose.x, y: loose.y };
+  }
+
+  // The highest surface the fall from py down to y passes through. It has to
+  // be a swept test: asking only about the current position misses every
+  // surface already behind it, so the rope would drop past the whole city.
+  function surfaceCrossed(x, py, y) {
+    var best = null;
+    for (var li = 0; li < levels.length; li++) {
+      var L = levels[li];
+      var list = nearIn(L, x - 600, x + 600);
+      for (var i = 0; i < list.length; i++) {
+        var b = list[i];
+        if (x > b.x && x < b.x + b.w && b.top >= py && b.top <= y &&
+            (best === null || b.top < best)) best = b.top;
+      }
+      if (L.baseY >= py && L.baseY <= y && (best === null || L.baseY < best)) best = L.baseY;
+    }
+    return best;
+  }
+
+  function stepLoose(dt) {
+    if (!loose) return;
+    if (loose.phase === "swing") {
+      // a plain pendulum about the anchor, bleeding energy until it hangs still
+      loose.av += (-GRAV / loose.len) * Math.sin(loose.th) * dt;
+      loose.av *= (1 - SWING_DAMP * dt);
+      loose.th += loose.av * dt;
+      // The swing is over once its amplitude — the angle it still reaches at
+      // the ends of its arc — drops under SWING_MIN. That comes from energy,
+      // not the current angle, which passes through zero on every pass.
+      var amp = Math.acos(clamp(
+        Math.cos(loose.th) - loose.len * loose.av * loose.av / (2 * GRAV), -1, 1));
+      if (amp < SWING_MIN) {
+        var tip = looseTip();
+        loose.phase = "fall";
+        loose.x = tip.x; loose.y = tip.y; loose.py = tip.y; loose.vx = 0; loose.vy = 0;
+      }
+    } else if (loose.phase === "fall") {
+      loose.py = loose.y;
+      loose.vy += GRAV * dt;
+      loose.y += loose.vy * dt;
+      var top = surfaceCrossed(loose.x, loose.py, loose.y + 3);
+      if (top === null) {
+        // backstop: the window of levels slides as you travel, so a rope
+        // falling past everything still tracked would be gone for good.
+        // Catch it on the lowest street we know about.
+        var floorY = levels[0].baseY;
+        for (var fi = 1; fi < levels.length; fi++) {
+          if (levels[fi].baseY > floorY) floorY = levels[fi].baseY;
+        }
+        if (loose.y + 3 >= floorY) top = floorY;
+      }
+      if (top !== null) {
+        loose.y = top - 3;
+        loose.phase = "rest";
+      }
+    }
+    // Two ways to get it back. A — the anchored end — can be unhooked while
+    // the rope still hangs there, but only where it sits near a rooftop you
+    // can stand on. B — the loose end — only once it has come to rest on the
+    // ground; you cannot snatch it out of the air mid-swing.
+    var reach = RADIUS + PICKUP;
+
+    if (loose.phase === "swing" && anchorReachable(loose.ax, loose.ay) &&
+        Math.hypot(player.x - loose.ax, player.y - loose.ay) < reach) {
+      loose = null;
+      hasRope = true;
+      ropeSafe = true;               // recovered once, and it holds for good
+      return;
+    }
+
+    if (loose.phase === "rest") {
+      var t = looseTip();
+      var gap = Math.hypot(player.x - t.x, player.y - t.y);
+      if (gap > reach * 1.5) loose.free = true;
+      if (loose.free && gap < reach) {
+        loose = null;
+        hasRope = true;
+        ropeSafe = true;
+      }
+    }
+  }
+
+  // is the anchor sitting close enough to a roof edge to be unhooked by hand?
+  function anchorReachable(ax, ay) {
+    for (var li = 0; li < levels.length; li++) {
+      var L = levels[li];
+      var list = nearIn(L, ax - 200, ax + 200);
+      for (var i = 0; i < list.length; i++) {
+        var b = list[i];
+        if (ax >= b.x && ax <= b.x + b.w && Math.abs(ay - b.top) < ANCHOR_REACH) {
+          return true;
+        }
+      }
+      if (Math.abs(ay - L.baseY) < ANCHOR_REACH) return true;
+    }
+    return false;
+  }
 
   // through the door: a fresh city on the other side, with the palette flipped
   function crossOver() {
@@ -378,6 +581,8 @@
     stats.far = far;
     rope.on = false;
     puffs = [];
+    hasRope = true;
+    loose = null;
     lockGrapple = false;
     cam.x = player.x; cam.y = player.y - 60; cam.lead = 0; cam.limitV = player.y + 120;
   }
@@ -394,13 +599,20 @@
   var COYOTE = 7;           // this close to a surface below, a jump is refunded
   var MAX_JUMPS = 2;        // presses available between landings
   var RECHARGE = 4;  // seconds before a spent air jump comes back on its own
-  // the line lets go this far round the arc, measured from hanging straight
-  // down. 90 would be level with the anchor; 85 cuts it just short of that.
-  var BREAK_COS = Math.cos(85 * Math.PI / 180);
+  // How far round the arc the line lets go of you, measured from hanging
+  // straight down, on the forward side of the swing. 90 is level with the
+  // anchor, so 85 holds on almost to the top of the arc.
+  var BREAK_ANGLE = 85;
+  var BREAK_COS = Math.cos(BREAK_ANGLE * Math.PI / 180);
 
-  // is there a roof or street just under our feet, even if we are not on it?
+  // Is there a roof or street just under our feet that we are about to land
+  // on? Only while descending, only while it is actually solid, and only from
+  // above — otherwise rising past a rooftop would refund the jump budget.
   function surfaceBelow() {
     var p = player;
+    if (p.vy < 0 || rope.on) return false;
+    // hollow: nothing is solid, unless you hold space to brace for a landing
+    if (player.jumps >= MAX_JUMPS && !keys[" "]) return false;
     for (var li = 0; li < levels.length; li++) {
       var L = levels[li];
       var list = nearIn(L, p.x - 500, p.x + 500);
@@ -408,11 +620,11 @@
         var b = list[i];
         if (p.x + RADIUS > b.x && p.x - RADIUS < b.x + b.w) {
           var gap = b.top - (p.y + RADIUS);
-          if (gap >= -RADIUS && gap <= COYOTE) return true;
+          if (gap >= 0 && gap <= COYOTE) return true;
         }
       }
       var g = L.baseY - (p.y + RADIUS);
-      if (g >= -RADIUS && g <= COYOTE) return true;
+      if (g >= 0 && g <= COYOTE) return true;
     }
     return false;
   }
@@ -436,9 +648,18 @@
     var p = player;
     p.rx = p.x; p.ry = p.y;              // previous state, for render interpolation
 
-    // losing altitude faster than BACKROOMS_FALL metres a second: you have
-    // fallen out of the city entirely
-    if (p.vy / PPM > BACKROOMS_FALL) { frozen = true; return; }
+    // Three levels down inside the window and you have fallen out of the city
+    runT += dt;
+    var depthNow = Math.round((GROUND_Y - levels[1].baseY) / LEVEL_GAP);
+    if (!depthHist.length || depthHist[depthHist.length - 1].d !== depthNow) {
+      depthHist.push({ d: depthNow, t: runT });
+    }
+    while (depthHist.length > 1 && runT - depthHist[0].t > BACKROOMS_WINDOW) {
+      depthHist.shift();
+    }
+    for (var hi = 0; hi < depthHist.length; hi++) {
+      if (depthHist[hi].d - depthNow >= BACKROOMS_DROP) { frozen = true; return; }
+    }
 
     if (pointer.down && !rope.on && !lockGrapple) tryGrapple();
 
@@ -522,47 +743,64 @@
 
       // Which way round the arc we are going is latched while we are low on
       // it, where horizontal speed is large. Reading vx at the break point
-      // would be useless: at the top of a swing the motion is purely vertical,
-      // so vx is passing through zero exactly where this has to decide.
+      // would be useless: near the top of a swing the motion is mostly
+      // vertical, so vx is passing through zero close to where this decides.
       var ady = p.y - rope.y;
       var cut = rope.len * BREAK_COS;
+      var side = p.x - rope.x;
       if (ady > cut + 10) {
+        // below the break angle: arm, and latch which way round the arc we
+        // are going from the sign of vx, which is large and unambiguous here
         rope.armed = true;
-        if (Math.abs(p.vx) > 20) rope.dir = p.vx > 0 ? 1 : -1;
+        rope.tested = false;
+        if (Math.abs(p.vx) > 1) rope.dir = p.vx > 0 ? 1 : -1;
+        else if (side !== 0) rope.dir = side > 0 ? 1 : -1;
       }
-      if (rope.armed && rope.dir && ady <= cut && (p.x - rope.x) * rope.dir > 0) {
+      var fwd = rope.dir && side * rope.dir > 0;
+      if (rope.armed && fwd && p.vy < 0) rope.rose = true;
+
+      var spd = Math.hypot(p.vx, p.vy);
+      // Crossing BREAK_ANGLE on the forward side ends the swing: the line lets
+      // go of you and comes back with you. It is not a break — the only thing
+      // that costs you the rope now is spamming grapples. Each arc gets one
+      // release, and a swing too gentle to reach the angle lets go at its apex
+      // or once it has died away to nothing.
+      if (rope.armed && !rope.tested && fwd && ady <= cut) {
+        rope.tested = true;
         release();
-        // a line that cuts itself does not come back while the mouse is still
-        // down: you have to let go and press again
+        lockGrapple = true;
+      } else if (rope.armed && !rope.tested &&
+                 (spd < 12 || (fwd && rope.rose && p.vy >= 0))) {
+        rope.tested = true;
+        release();
         lockGrapple = true;
       }
     }
 
     // Roofs and streets are one-way platforms: solid only crossing downward
-    // from above. Rooftops stop being solid past PHASE_SPEED (unless you hold
-    // jump), but the street never does — the only way under it is on a web.
+    // from above. With the double jump spent — the hollow state — nothing is
+    // solid at all and you sink straight through; the world comes back the
+    // moment the jump recharges. The one exception is a lost rope, which keeps
+    // everything solid so you can land and go and fetch it.
     var landedOn = -1;
     var onDoor = false;
-    var braced = !!keys[" "];
-    var dropping = !!keys.s;                       // S drops you through anything
-    var roofsSolid = !dropping && (braced || Math.hypot(p.vx, p.vy) <= PHASE_SPEED);
-    if (p.vy > 0) {
+    var ghost = p.jumps >= MAX_JUMPS && !keys[" "];
+    var solid = !ghost || loose !== null;
+    if (p.vy > 0 && solid) {
       for (var li = 0; li < levels.length && landedOn < 0; li++) {
         var L = levels[li];
-        if (roofsSolid) {
-          var list = nearIn(L, p.x - 500, p.x + 500);
-          for (var i = 0; i < list.length; i++) {
-            var b = list[i];
-            if (p.x + RADIUS > b.x && p.x - RADIUS < b.x + b.w &&
-                py0 + RADIUS <= b.top + 1 && p.y + RADIUS >= b.top) {
-              p.y = b.top - RADIUS; p.vy = 0; p.grounded = true; p.jumps = 0;
-              landedOn = li;
-              if (b.door && Math.abs(p.x - (b.x + b.w / 2)) < 24) onDoor = true;
-              break;
-            }
+        var list = nearIn(L, p.x - 500, p.x + 500);
+        for (var i = 0; i < list.length; i++) {
+          var b = list[i];
+          if (p.x + RADIUS > b.x && p.x - RADIUS < b.x + b.w &&
+              py0 + RADIUS <= b.top + 1 && p.y + RADIUS >= b.top) {
+            p.y = b.top - RADIUS; p.vy = 0; p.grounded = true; p.jumps = 0;
+            landedOn = li;
+            if (b.door && Math.abs(p.x - (b.x + b.w / 2)) < 24) onDoor = true;
+            break;
           }
         }
-        if (landedOn < 0 && !rope.on && !dropping &&
+        if (landedOn < 0 && !rope.on &&
             py0 + RADIUS <= L.baseY + 1 && p.y + RADIUS >= L.baseY) {
           p.y = L.baseY - RADIUS; p.vy = 0; p.grounded = true; p.jumps = 0;
           landedOn = li;
@@ -596,6 +834,7 @@
     if (p.blinkT > 0) p.blinkT -= dt;
 
     stats.far = Math.max(stats.far, (p.x - stats.startX) / PPM);
+    stepLoose(dt);
     var altNow = (GROUND_Y - p.y) / PPM;
     if (altNow > stats.high) stats.high = altNow;
     if (altNow < stats.low) stats.low = altNow;
@@ -688,6 +927,24 @@
       ctx.fillRect(rope.x - 3, rope.y - 3, 6, 6);
     }
 
+    // the rope after it has snapped: swinging free, falling, or lying about
+    if (loose) {
+      var lt = looseTip();
+      ctx.strokeStyle = theme.rope;
+      ctx.fillStyle = theme.rope;
+      if (loose.phase === "swing") {
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(loose.ax, loose.ay);
+        ctx.lineTo(lt.x, lt.y);
+        ctx.stroke();
+        ctx.fillRect(loose.ax - 3, loose.ay - 3, 6, 6);
+      } else {
+        // dropped: the same small square, falling and then lying there
+        ctx.fillRect(lt.x - 3, lt.y - 3, 6, 6);
+      }
+    }
+
     // the ring left behind by an air jump
     for (var pi = 0; pi < puffs.length; pi++) {
       var q = puffs[pi];
@@ -701,23 +958,41 @@
     }
     ctx.globalAlpha = 1;
 
-    // Fill carries the air jump (solid = ready, empty = spent), outline goes
-    // white while S is held. Those two together used to be a white fill under
-    // a white outline — invisible — so a spent jump keeps a tinted body while
-    // dropping, and a chevron under the dot marks drop mode either way.
+    // The dot stays blue; it drags a streak once you are fast enough to tear
+    // through surfaces. Hollow once the double is spent.
     var full = player.jumps < MAX_JUMPS;
     if (player.blinkT > 0) full = Math.floor(player.blinkT * 12) % 2 === 0;
-    var dropping = !!keys.s;
 
-    ctx.fillStyle = dropping
-      ? (full ? theme.dot : theme.drop)
-      : (full ? theme.dot : theme.bg);
+    ctx.fillStyle = full ? theme.dot : theme.bg;
     ctx.beginPath();
     ctx.arc(drawX, drawY, RADIUS, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = dropping ? theme.dropEdge : (full ? theme.dotEdge : theme.dot);
+    ctx.strokeStyle = full ? theme.dotEdge : theme.dot;
     ctx.lineWidth = 2;
     ctx.stroke();
+
+    // with the rope gone, a red arrow orbits you pointing the way back to it:
+    // at A while it still hangs from the building, at the square once it drops
+    if (loose) {
+      var tgt = loose.phase === "swing"
+        ? { x: loose.ax, y: loose.ay }
+        : looseTip();
+      var adx = tgt.x - drawX, ady2 = tgt.y - drawY;
+      var adist = Math.hypot(adx, ady2);
+      if (adist > 30) {
+        var ux = adx / adist, uy = ady2 / adist;
+        var px2 = -uy, py2 = ux;                 // perpendicular to the aim
+        var bx2 = drawX + ux * 18, by2 = drawY + uy * 18;
+        ctx.fillStyle = theme.rope;
+        ctx.beginPath();
+        ctx.moveTo(bx2 + ux * 5, by2 + uy * 5);              // the tip
+        ctx.lineTo(bx2 - ux * 2 + px2 * 3.2, by2 - uy * 2 + py2 * 3.2);
+        ctx.lineTo(bx2 - ux * 0.7, by2 - uy * 0.7);          // shallow notch
+        ctx.lineTo(bx2 - ux * 2 - px2 * 3.2, by2 - uy * 2 - py2 * 3.2);
+        ctx.closePath();
+        ctx.fill();
+      }
+    }
 
     ctx.restore();
   }
@@ -728,7 +1003,24 @@
     { k: "dist",   get: function () { return Math.round(player.x - stats.startX) + "px"; } },
     { k: "speed",  get: function () { return Math.round(Math.hypot(player.vx, player.vy)) + "px/s"; } },
     { k: "height", get: function () { return Math.round(GROUND_Y - player.y) + "px"; } },
-    { k: "depth",  get: function () { return String(Math.round((GROUND_Y - levels[1].baseY) / LEVEL_GAP)); } }
+    { k: "depth",  get: function () { return String(Math.round((GROUND_Y - levels[1].baseY) / LEVEL_GAP)); } },
+    { k: "rope",   get: function () {
+        if (!hasRope) return "dropped";
+        if (ropeSafe) return "safe";
+        return String(ropeUses);
+      } },
+    { k: "snap",   get: function () {
+        // why the line is or is not currently at risk of parting
+        if (ropeSafe) return "safe";
+        if (!hasRope) return "gone";
+        if (Math.hypot(player.vx, player.vy) > SNAP_MAX_SPEED) return "fast";
+        if (clearanceBelow() <= SNAP_MIN_CLEAR) return "low";
+        return (runT - lastGrappleT) < GRAPPLE_GAP ? "strained" : "ok";
+      } },
+    { k: "jumps",  get: function () {
+        // the ordinary jump is not part of the budget; only the double is
+        return Math.max(0, MAX_JUMPS - Math.max(player.jumps, 1)) + "/" + (MAX_JUMPS - 1);
+      } }
   ];
   var pinned = null;
   var statEls = [];
@@ -777,14 +1069,19 @@
       drawX = lerp(player.rx, player.x, a);
       drawY = lerp(player.ry, player.y, a);
 
-      // sitting still with nothing held for long enough brings the title back
-      if (started) {
-        var holding = pointer.down || keys[" "] || keys.a || keys.d || keys.s || keys.w ||
+      // Sitting still with nothing held for long enough brings the title back,
+      // but never while the rope is away: hunting for it often means standing
+      // about, and the title has no business interrupting that.
+      if (started && hasRope) {
+        var holding = pointer.down || keys[" "] || keys.a || keys.d || keys.w ||
                       keys.arrowleft || keys.arrowright || keys.arrowup || keys.arrowdown;
-        if (holding || Math.hypot(player.vx, player.vy) > 12) idleT = 0;        else {
+        if (holding || Math.hypot(player.vx, player.vy) > 12) idleT = 0;
+        else {
           idleT += dt;
           if (idleT >= IDLE_BACK) returnToIntro();
         }
+      } else {
+        idleT = 0;              // so it does not fire the moment you get it back
       }
 
       updateCamera(dt);
@@ -841,3 +1138,6 @@
   requestAnimationFrame(frame);
 })();
 </script>
+
+</body>
+</html>
