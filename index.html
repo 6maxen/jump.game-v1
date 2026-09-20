@@ -623,7 +623,7 @@
     var braced = !!keys[" "];
     var fast = Math.hypot(p.vx, p.vy) > PHASE_SPEED;
     var roofOK = braced || !fast;
-    var streetOK = braced || (p.jumps < MAX_JUMPS && !fast);
+    var streetOK = braced || p.jumps < MAX_JUMPS;
     for (var li = 0; li < levels.length; li++) {
       var L = levels[li];
       if (roofOK) {
@@ -771,11 +771,11 @@
     // solid at all and you sink straight through; the world comes back the
     // moment the jump recharges. The one exception is a lost rope, which keeps
     // everything solid so you can land and go and fetch it.
-    // Rooftops and streets are treated separately now. On a line you pass
-    // through both — the swing owns your movement. Spending the double jump
-    // opens the streets but leaves the rooftops solid, so it drops you a
-    // level rather than out of the world; only real speed opens the roofs
-    // too. Holding space, or hunting a lost rope, keeps everything solid.
+    // Rooftops and streets are treated separately. On a line you pass through
+    // both — the swing owns your movement. The ground opens only for a spent
+    // double jump, never for speed: a single level of falling puts you well
+    // past any speed threshold, so letting speed open it too would mean one
+    // phase could never be recovered from. Speed opens the rooftops alone.
     var landedOn = -1;
     var onDoor = false;
     var braced = !!keys[" "];
@@ -785,7 +785,7 @@
     var roofSolid, streetSolid;
     if (rope.on) { roofSolid = false; streetSolid = false; }
     else if (braced || recovering) { roofSolid = true; streetSolid = true; }
-    else { roofSolid = !fast; streetSolid = !hollow && !fast; }
+    else { roofSolid = !fast; streetSolid = !hollow; }
 
     if (p.vy > 0 && (roofSolid || streetSolid)) {
       for (var li = 0; li < levels.length && landedOn < 0; li++) {
