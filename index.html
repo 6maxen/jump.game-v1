@@ -306,6 +306,7 @@
   var hasRope = true;
   var loose = null;                    // { phase, ... } while the rope is away
   var PICKUP = 22;                     // how close you must be to collect it
+  var PICKUP_DELAY = 2.5;              // seconds before a snapped rope can be taken
   var ANCHOR_REACH = 40;               // how near a roof the anchor must sit
   var GRAPPLE_GAP = 0.5;               // fire again inside this and it counts as spam
   var BREAK_CHANCE = 0.45;             // a spammed line has this chance of parting
@@ -464,6 +465,7 @@
       // the snapped rope starts exactly where you are, so it cannot be
       // collected until you have actually moved clear of it once
       free: false,
+      age: 0,
       x: 0, y: 0, py: 0, vx: 0, vy: 0
     };
     hasRope = false;
@@ -498,6 +500,7 @@
 
   function stepLoose(dt) {
     if (!loose) return;
+    loose.age += dt;
     if (loose.phase === "swing") {
       // a plain pendulum about the anchor, bleeding energy until it hangs still
       loose.av += (-GRAV / loose.len) * Math.sin(loose.th) * dt;
@@ -533,17 +536,19 @@
         loose.phase = "rest";
       }
     }
-    // Two ways to get it back. A — the anchored end — can be unhooked while
-    // the rope still hangs there, but only where it sits near a rooftop you
-    // can stand on. B — the loose end — only once it has come to rest on the
-    // ground; you cannot snatch it out of the air mid-swing.
+    // Two ways to get it back, and neither works for the first PICKUP_DELAY
+    // seconds. A — the anchored end — can be unhooked while the rope still
+    // hangs there, but only near a rooftop you can stand on, and a rope caught
+    // that early is still a rope that can break again. B — the loose end —
+    // only once it has come to rest, and recovering it that way makes the
+    // rope permanent.
+    if (loose.age < PICKUP_DELAY) return;
     var reach = RADIUS + PICKUP;
 
     if (loose.phase === "swing" && anchorReachable(loose.ax, loose.ay) &&
         Math.hypot(player.x - loose.ax, player.y - loose.ay) < reach) {
       loose = null;
       hasRope = true;
-      ropeSafe = true;               // recovered once, and it holds for good
       return;
     }
 
@@ -554,7 +559,7 @@
       if (loose.free && gap < reach) {
         loose = null;
         hasRope = true;
-        ropeSafe = true;
+        ropeSafe = true;             // waited it out: it holds for good now
       }
     }
   }
