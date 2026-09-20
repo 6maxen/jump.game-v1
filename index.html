@@ -1,3 +1,11 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="darkreader-lock">
+</head>
+<body>
 <title>Skyline Swing</title>
 <style>
   :root{
@@ -167,6 +175,29 @@
              dim: "#8b8b9c", veil: "rgba(18,18,24,.82)" }
   };
   var theme = THEMES.light;
+  var themeAuto = true;      // until a door is used, the theme follows the browser
+
+  // Dark Reader rewrites CSS but cannot touch a canvas, so the page would go
+  // dark while the city stayed light. Detect it and flip the game's own theme.
+  function darkReaderActive() {
+    try {
+      var de = document.documentElement;
+      if (de.getAttribute("data-darkreader-scheme")) return true;
+      if (de.getAttribute("data-darkreader-mode")) return true;
+      if (document.querySelector('style.darkreader,style[class*="darkreader"]')) return true;
+    } catch (e) {}
+    return false;
+  }
+  function prefersDark() {
+    try {
+      return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    } catch (e) { return false; }
+  }
+  function detectDark() {
+    if (!themeAuto) return;              // a door beats any automatic choice
+    var d = darkReaderActive() || prefersDark();
+    if (d !== darkSide) { darkSide = d; setTheme(darkSide); }
+  }
 
   function setTheme(dark) {
     theme = dark ? THEMES.dark : THEMES.light;
@@ -344,6 +375,7 @@
   // through the door: a fresh city on the other side, with the palette flipped
   function crossOver() {
     darkSide = !darkSide;
+    themeAuto = false;           // from here the player's choice sticks
     setTheme(darkSide);
     doorT = 0;
     doorLock = true;             // must step off the arrival door before it works
@@ -795,8 +827,19 @@
   cv.addEventListener("pointercancel", up);
 
   resize();
+  darkSide = darkReaderActive() || prefersDark();
   reset();
   buildHud();
+  // extensions inject late, so look again shortly after load
+  setTimeout(detectDark, 400);
+  setTimeout(detectDark, 1500);
+  try {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) mq.addEventListener("change", detectDark);
+  } catch (e) {}
   requestAnimationFrame(frame);
 })();
 </script>
+
+</body>
+</html>
