@@ -1,0 +1,802 @@
+<title>Skyline Swing</title>
+<style>
+  :root{
+    --bg:#f2f2f0;
+    --ink:#16161a;
+    --dim:#5c5c58;
+    --veil:rgba(242,242,240,.82);
+  }
+  /* one root size drives every text on the page, and it tracks the viewport */
+  html{font-size:clamp(12px,1.15vw,20px)}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);overflow:hidden}
+  [hidden]{display:none!important}
+  body{font:1rem/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  #game{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:crosshair}
+  #hud{
+    position:fixed;left:0;top:0;
+    padding:calc(env(safe-area-inset-top,0px) + 0.85em) 1.3em 0;
+    white-space:pre;font-variant-numeric:tabular-nums;color:var(--ink);
+    pointer-events:none;z-index:2;
+  }
+  #keys{
+    position:fixed;left:0;right:0;bottom:0;
+    padding:0 1.3em calc(env(safe-area-inset-bottom,0px) + 0.85em);
+    color:var(--dim);pointer-events:none;z-index:2;
+  }
+  #ach{
+    position:fixed;inset:0;display:grid;place-items:center;
+    padding:2em 1.3em;text-align:center;
+    background:var(--veil);color:var(--ink);
+    pointer-events:none;z-index:3;
+  }
+  #ach b{display:block;font-weight:400;letter-spacing:.06em}
+  #ach small{display:block;margin-top:0.85em;color:var(--dim)}
+  #title{
+    position:fixed;left:0;right:0;top:0;
+    padding:calc(env(safe-area-inset-top,0px) + 7em) 1.3em 0;
+    text-align:center;pointer-events:none;z-index:2;
+    opacity:1;transition:opacity 1.2s cubic-bezier(.4,0,.2,1);
+  }
+  #title.gone{opacity:0}
+  #title b{
+    display:block;font-weight:400;
+    font-size:3.2rem;line-height:1.1;letter-spacing:.14em;color:var(--ink);
+  }
+  #title small{
+    display:block;margin-top:1.2rem;font-size:1.15rem;letter-spacing:.06em;color:var(--dim);
+  }
+  #hud .stat{
+    pointer-events:auto;cursor:pointer;
+    border-bottom:1px solid transparent;
+  }
+  #hud .stat:hover{border-bottom-color:var(--dim)}
+  #hud .stat.pinned{border-bottom-color:var(--ink)}
+  #big{
+    position:fixed;right:0;bottom:0;
+    padding:0 1.4em calc(env(safe-area-inset-bottom,0px) + 3.4em);
+    text-align:right;pointer-events:none;z-index:2;
+  }
+  #big .k{
+    display:block;font-size:1rem;letter-spacing:.16em;color:var(--dim);
+  }
+  #big .v{
+    display:block;margin-top:0.3rem;
+    font-size:3.2rem;line-height:1;letter-spacing:.04em;
+    color:var(--ink);font-variant-numeric:tabular-nums;
+  }
+  @media (prefers-reduced-motion:reduce){ #title{transition:none} }
+</style>
+
+<canvas id="game"></canvas>
+<div id="title"><b>jump game!</b><small id="tip">press space to jump</small></div>
+<div id="big" hidden><span class="k" id="bigK"></span><span class="v" id="bigV"></span></div>
+<div id="hud">dist 0m</div>
+<div id="ach" hidden><b>achievement unlocked: backrooms</b><small>R to restart</small></div>
+<div id="keys">mouse = grapple, space = (double) jump, W = reel in, S = phase, A/D = move, R = restart</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var cv = document.getElementById("game");
+  var ctx = cv.getContext("2d");
+  var elHud = document.getElementById("hud");
+  var elAch = document.getElementById("ach");
+  var elTitle = document.getElementById("title");
+  var elTip = document.getElementById("tip");
+  var elBig = document.getElementById("big");
+  var elBigK = document.getElementById("bigK");
+  var elBigV = document.getElementById("bigV");
+  var frozen = false;
+  var started = false;
+  var INTRO_ZOOM = 1.5;
+  var INTRO_TIME = 1.6;     // seconds for the zoom to travel either way
+  var introP = 1;           // 1 = fully zoomed in on the title, 0 = playing
+  var IDLE_BACK = 2;        // seconds of stillness before the title returns
+  var idleT = 0;
+
+  // index 0 is the opening line and only shows on a fresh start; after that
+  // the tips cycle
+  var TIPS = [
+    "press space to jump",
+    "tip: use your mouse to grapple buildings!",
+    "tip: hold 'S' to turn off ground/building collisions.",
+    "tip: double jump to reach higher places"
+  ];
+  var tipIndex = 0;
+
+  function nextTip() {
+    tipIndex = tipIndex + 1 >= TIPS.length ? 1 : tipIndex + 1;
+    elTip.textContent = TIPS[tipIndex];
+  }
+
+  // the first input of a run drops the title and eases the view back out
+  function beginPlay() {
+    idleT = 0;
+    if (started) return;
+    started = true;
+    elTitle.classList.add("gone");
+  }
+
+  function returnToIntro() {
+    started = false;
+    idleT = 0;
+    nextTip();
+    elTitle.classList.remove("gone");
+  }
+  var W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = cv.clientWidth; H = cv.clientHeight;
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+
+  var GROUND_Y = 620;          // street level of the first map
+  // Vertical distance between stacked maps. Buildings rise from their own
+  // street, so the map above shows as a ceiling MAX_H shy of this: 2400 puts
+  // that ceiling roughly as far overhead as the next street is underfoot.
+  var LEVEL_GAP = 2400;
+  var GRAV = 1500;
+  var MAX_ROPE = 660, MIN_ROPE = 55;
+  var PPM = 12;
+  var RADIUS = 9;
+  var JUMP = 700;
+  var MIN_H = 300, MAX_H = 950;
+
+  // on foot: hard shove off the mark, easing as you approach the cap, but
+  // never weaker than RUN_ACCEL_MIN so it always feels responsive
+  var RUN_MAX = 700, RUN_ACCEL_MAX = 2600, RUN_ACCEL_MIN = 800;
+  var PHASE_SPEED = 2000;      // above this you pass through roofs and streets
+  var BACKROOMS_FALL = 700;    // metres of altitude lost per second before it all stops
+
+  var DOOR_AT = 67;         // a door stands on every sixty-seventh building
+  var DOOR_HOLD = 1;        // seconds of standing on it before it opens
+  var doorT = 0, darkSide = false, doorLock = false;
+
+  var THEMES = {
+    light: { bg: "#f2f2f0", fill: "#c9c9c6", edge: "#8f8f8b", ink: "#16161a",
+             rope: "#d0392b", dot: "#1f5fd0", dotEdge: "#16161a",
+             drop: "#8fb0e8", dropEdge: "#ffffff",
+             dim: "#5c5c58", veil: "rgba(242,242,240,.82)" },
+    dark:  { bg: "#121218", fill: "#26262f", edge: "#4e4e60", ink: "#eceaf4",
+             rope: "#ff7a63", dot: "#5aa9ff", dotEdge: "#0a0a10",
+             drop: "#2d5b9e", dropEdge: "#ffffff",
+             dim: "#8b8b9c", veil: "rgba(18,18,24,.82)" }
+  };
+  var theme = THEMES.light;
+
+  function setTheme(dark) {
+    theme = dark ? THEMES.dark : THEMES.light;
+    var r = document.documentElement.style;
+    r.setProperty("--bg", theme.bg);
+    r.setProperty("--ink", theme.ink);
+    r.setProperty("--dim", theme.dim);
+    r.setProperty("--veil", theme.veil);
+  }
+
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---- levels: the current map, plus the one waiting below it ----
+  var levels = [];
+
+  var INTRO_END = 2200;   // the opening stretch of the first map is jumpable
+
+  function makeLevel(baseY, seed, intro) {
+    var L = { baseY: baseY, items: [], cursor: -1200, rnd: mulberry32(seed),
+              intro: !!intro, prevH: null, count: 0 };
+    growLevel(L, 3200);
+    return L;
+  }
+
+  function growLevel(L, toX) {
+    while (L.cursor < toX) {
+      var r = L.rnd;
+      // the opening buildings sit close together at similar heights, so the
+      // first stretch can be crossed on foot before you touch the line
+      var easy = L.intro && L.cursor < INTRO_END;
+      var w, h, gap;
+      if (easy) {
+        if (L.prevH === null) L.prevH = 520;
+        // a jump rises about 163px, so keep every step well inside that
+        h = clamp(L.prevH + (r() - 0.5) * 150, 420, 700);
+        L.prevH = h;
+        w = 220 + r() * 120;
+        gap = 70 + r() * 50;
+      } else {
+        // independent draw per building, skewed tall — no relation to neighbours
+        h = MIN_H + (MAX_H - MIN_H) * (1 - Math.pow(r(), 2));
+        w = 200 + r() * 220;
+        gap = 110 + r() * 145;
+      }
+      L.count++;
+      L.items.push({ x: L.cursor, w: w, top: L.baseY - h, door: L.count % DOOR_AT === 0 });
+      L.cursor += w + gap;
+    }
+  }
+  var KEEP_BEHIND = 15;   // buildings kept behind you after they leave view
+
+  function trimLevel(L, minX) {
+    var behind = 0;
+    while (behind < L.items.length &&
+           L.items[behind].x + L.items[behind].w < minX) behind++;
+    for (var i = behind - KEEP_BEHIND; i > 0; i--) L.items.shift();
+  }
+  function nearIn(L, x0, x1) {
+    var out = [], it = L.items;
+    for (var i = 0; i < it.length; i++) {
+      var b = it[i];
+      if (b.x + b.w < x0) continue;
+      if (b.x > x1) break;
+      out.push(b);
+    }
+    return out;
+  }
+
+  // levels[0] is the map above, levels[1] the one you are on, levels[2] below.
+  // Reaching either neighbour shifts the window and builds a fresh far side.
+  function shiftDown() {
+    levels = [levels[1], levels[2],
+              makeLevel(levels[2].baseY + LEVEL_GAP, (Math.random() * 1e9) | 0, false)];
+  }
+  function shiftUp() {
+    levels = [makeLevel(levels[0].baseY - LEVEL_GAP, (Math.random() * 1e9) | 0, false),
+              levels[0], levels[1]];
+  }
+
+  // ---- state ----
+  var player, rope, cam, stats, keys = Object.create(null);
+  var pointer = { down: false, x: 0, y: 0 };
+  var drawX = 0, drawY = 0;
+  var puffs = [];                      // expanding rings marking each air jump
+  var lockGrapple = false;             // set when a line breaks itself mid-hold
+
+  // builds three stacked maps and stands the player on the middle one
+  function buildWorld(intro, spawnDoor) {
+    levels = [
+      makeLevel(GROUND_Y - LEVEL_GAP, (Math.random() * 1e9) | 0, false),
+      makeLevel(GROUND_Y, (Math.random() * 1e9) | 0, intro),
+      makeLevel(GROUND_Y + LEVEL_GAP, (Math.random() * 1e9) | 0, false)
+    ];
+    var b0 = levels[1].items[0];
+    for (var i = 0; i < levels[1].items.length; i++) {
+      if (levels[1].items[i].x >= 0) { b0 = levels[1].items[i]; break; }
+    }
+    // the way back: you arrive standing in a doorway on the far side
+    if (spawnDoor) b0.door = true;
+    player = {
+      x: b0.x + b0.w * 0.5, y: b0.top - RADIUS,
+      rx: 0, ry: 0, vx: 0, vy: 0, grounded: true, airJumps: 1, airCutDir: 0,
+      rechargeT: 0, blinkT: 0
+    };
+    player.rx = player.x; player.ry = player.y;
+  }
+
+  function reset() {
+    frozen = false;
+    started = false;
+    idleT = 0;
+    introP = 1;
+    tipIndex = 0;
+    doorT = 0;
+    doorLock = false;
+    setTheme(darkSide);          // restarting keeps whichever side you are on
+    elTip.textContent = TIPS[0];
+    elTitle.classList.remove("gone");
+    buildWorld(true, false);
+    rope = { on: false, x: 0, y: 0, len: 0, armed: false, dir: 0 };
+    puffs = [];
+    lockGrapple = false;
+    cam = { x: player.x, y: player.y - 60, zoom: 1, lead: 0, limitV: GROUND_Y + 120 };
+    stats = { startX: player.x, far: 0, high: 0, low: 0 };
+  }
+
+  // ---- grapple: passes through everything, but must land on a building ----
+  function tryGrapple() {
+    if (!pointer.down) return false;
+    var wp = screenToWorld(pointer.x, pointer.y);
+    var dx = wp.x - player.x, dy = wp.y - player.y;
+    var d = Math.hypot(dx, dy);
+    if (d < 12) return false;
+    var ux = dx / d, uy = dy / d;
+    var ex = player.x + ux * MAX_ROPE;
+
+    var stp = 6, n = Math.floor(MAX_ROPE / stp);
+    var bx = 0, by = 0, bd = Infinity, found = false;
+
+    for (var li = 0; li < levels.length; li++) {
+      var L = levels[li];
+      var list = nearIn(L, Math.min(player.x, ex) - 40, Math.max(player.x, ex) + 40);
+      for (var i = 5; i <= n; i++) {
+        var sx = player.x + ux * stp * i, sy = player.y + uy * stp * i;
+        for (var j = 0; j < list.length; j++) {
+          var b = list[j];
+          if (sx > b.x && sx < b.x + b.w && sy > b.top && sy < L.baseY) {
+            var dd = Math.hypot(sx - wp.x, sy - wp.y);
+            if (dd < bd) { bd = dd; bx = sx; by = sy; found = true; }
+            break;
+          }
+        }
+      }
+    }
+    if (!found) return false;
+
+    rope.on = true; rope.x = bx; rope.y = by;
+    rope.armed = false;           // arms once you are hanging well below it
+    rope.dir = player.vx > 0 ? 1 : (player.vx < 0 ? -1 : 0);
+    rope.len = clamp(Math.hypot(player.x - bx, player.y - by), MIN_ROPE, MAX_ROPE);
+    return true;
+  }
+
+  function release() { rope.on = false; }
+
+  // through the door: a fresh city on the other side, with the palette flipped
+  function crossOver() {
+    darkSide = !darkSide;
+    setTheme(darkSide);
+    doorT = 0;
+    doorLock = true;             // must step off the arrival door before it works
+    var far = stats.far;
+    buildWorld(false, true);
+    stats.startX = player.x;
+    stats.far = far;
+    rope.on = false;
+    puffs = [];
+    lockGrapple = false;
+    cam.x = player.x; cam.y = player.y - 60; cam.lead = 0; cam.limitV = player.y + 120;
+  }
+
+  function groundJump() {
+    player.vy = -JUMP;
+    player.grounded = false;
+    player.airJumps = 1;
+  }
+  var COYOTE = 7;    // within this of a landable surface, a jump is a ground jump
+  var RECHARGE = 4;  // seconds before a spent air jump comes back on its own
+  // the line lets go this far round the arc, measured from hanging straight
+  // down. 90 would be level with the anchor; 85 cuts it just short of that.
+  var BREAK_COS = Math.cos(85 * Math.PI / 180);
+
+  // is there a roof or street just under our feet, even if we are not on it?
+  function surfaceBelow() {
+    var p = player;
+    for (var li = 0; li < levels.length; li++) {
+      var L = levels[li];
+      var list = nearIn(L, p.x - 500, p.x + 500);
+      for (var i = 0; i < list.length; i++) {
+        var b = list[i];
+        if (p.x + RADIUS > b.x && p.x - RADIUS < b.x + b.w) {
+          var gap = b.top - (p.y + RADIUS);
+          if (gap >= -RADIUS && gap <= COYOTE) return true;
+        }
+      }
+      var g = L.baseY - (p.y + RADIUS);
+      if (g >= -RADIUS && g <= COYOTE) return true;
+    }
+    return false;
+  }
+
+  function jumpPressed() {
+    // close enough to a surface and it does not cost the air jump
+    if (player.grounded || surfaceBelow()) groundJump();
+    else if (player.airJumps > 0) {
+      player.airJumps--;
+      player.rechargeT = 0;
+      player.vy = -JUMP;
+      puffs.push({ x: player.x, y: player.y, t: 0, life: 0.38 });
+    }
+  }
+
+  // ---- simulation ----
+  function step(dt) {
+    var p = player;
+    p.rx = p.x; p.ry = p.y;              // previous state, for render interpolation
+
+    // losing altitude faster than BACKROOMS_FALL metres a second: you have
+    // fallen out of the city entirely
+    if (p.vy / PPM > BACKROOMS_FALL) { frozen = true; return; }
+
+    if (pointer.down && !rope.on && !lockGrapple) tryGrapple();
+
+    // holding space re-jumps on every landing, and never spends the air jump
+    if (keys[" "] && p.grounded) groundJump();
+
+    if (rope.on) {
+      if (keys.w || keys.arrowup) {
+        rope.len = Math.max(MIN_ROPE, rope.len - 520 * dt);
+        var rdx = rope.x - p.x, rdy = rope.y - p.y, rd = Math.hypot(rdx, rdy) || 1;
+        p.vx += (rdx / rd) * 640 * dt;
+        p.vy += (rdy / rd) * 640 * dt;
+      } else if (keys.arrowdown) {
+        rope.len = Math.min(MAX_ROPE, rope.len + 460 * dt);
+      } else {
+        var f = clamp(p.vy / 260, -1, 1);
+        rope.len = clamp(rope.len + (f > 0 ? -95 * f : 70 * -f) * dt, MIN_ROPE, MAX_ROPE);
+      }
+    }
+
+    var left = !!(keys.a || keys.arrowleft);
+    var right = !!(keys.d || keys.arrowright);
+    var accel = (right ? 1 : 0) - (left ? 1 : 0);
+    var brake = left && right;
+
+    if (brake) {
+      // both directions at once is a hard stop, on the ground or in the air,
+      // and it works while the other key is still held down
+      p.vx = 0;
+      p.airCutDir = 0;
+    } else if (p.grounded) {
+      if (accel) {
+        var along = accel * p.vx;                       // speed in the pressed direction
+        if (along < 0) {
+          // pressing against your own momentum turns you on the spot: you keep
+          // your speed (up to the cap) instead of grinding to a stop first
+          p.vx = accel * Math.min(Math.abs(p.vx), RUN_MAX);
+        } else if (along < RUN_MAX) {
+          // add force only below the cap, so a fast landing keeps its speed
+          var t = clamp(along / RUN_MAX, 0, 1);
+          var a = Math.max(RUN_ACCEL_MIN, RUN_ACCEL_MAX * (1 - t));
+          p.vx += accel * a * dt;
+        }
+      } else {
+        p.vx *= (1 - 4.5 * dt);
+      }
+      p.airCutDir = 0;
+    } else {
+      // in the air, pressing against your momentum cuts it dead so you drop
+      // straight down, and holds you there while the key is down
+      if (!rope.on && accel && (accel * p.vx < 0 || p.airCutDir === accel)) {
+        p.vx = 0;
+        p.airCutDir = accel;
+      } else {
+        p.airCutDir = 0;
+        p.vx += accel * (rope.on ? 620 : 430) * dt;
+        p.vx *= (1 - 0.06 * dt);
+        if (rope.on) {
+          var sp0 = Math.hypot(p.vx, p.vy);
+          if (sp0 > 1) p.vx += (p.vx / sp0) * 130 * dt;
+        }
+      }
+    }
+
+    p.vy += GRAV * dt;
+    var py0 = p.y;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.grounded = false;
+
+    if (rope.on) {
+      var dx = p.x - rope.x, dy = p.y - rope.y;
+      var d = Math.hypot(dx, dy);
+      if (d > rope.len && d > 0.001) {
+        var nx = dx / d, ny = dy / d;
+        p.x = rope.x + nx * rope.len;
+        p.y = rope.y + ny * rope.len;
+        var radial = p.vx * nx + p.vy * ny;
+        if (radial > 0) { p.vx -= nx * radial; p.vy -= ny * radial; }
+      }
+
+      // Which way round the arc we are going is latched while we are low on
+      // it, where horizontal speed is large. Reading vx at the break point
+      // would be useless: at the top of a swing the motion is purely vertical,
+      // so vx is passing through zero exactly where this has to decide.
+      var ady = p.y - rope.y;
+      var cut = rope.len * BREAK_COS;
+      if (ady > cut + 10) {
+        rope.armed = true;
+        if (Math.abs(p.vx) > 20) rope.dir = p.vx > 0 ? 1 : -1;
+      }
+      if (rope.armed && rope.dir && ady <= cut && (p.x - rope.x) * rope.dir > 0) {
+        release();
+        // a line that cuts itself does not come back while the mouse is still
+        // down: you have to let go and press again
+        lockGrapple = true;
+      }
+    }
+
+    // Roofs and streets are one-way platforms: solid only crossing downward
+    // from above. Rooftops stop being solid past PHASE_SPEED (unless you hold
+    // jump), but the street never does — the only way under it is on a web.
+    var landedOn = -1;
+    var onDoor = false;
+    var braced = !!keys[" "];
+    var dropping = !!keys.s;                       // S drops you through anything
+    var roofsSolid = !dropping && (braced || Math.hypot(p.vx, p.vy) <= PHASE_SPEED);
+    if (p.vy > 0) {
+      for (var li = 0; li < levels.length && landedOn < 0; li++) {
+        var L = levels[li];
+        if (roofsSolid) {
+          var list = nearIn(L, p.x - 500, p.x + 500);
+          for (var i = 0; i < list.length; i++) {
+            var b = list[i];
+            if (p.x + RADIUS > b.x && p.x - RADIUS < b.x + b.w &&
+                py0 + RADIUS <= b.top + 1 && p.y + RADIUS >= b.top) {
+              p.y = b.top - RADIUS; p.vy = 0; p.grounded = true; p.airJumps = 1;
+              landedOn = li;
+              if (b.door && Math.abs(p.x - (b.x + b.w / 2)) < 24) onDoor = true;
+              break;
+            }
+          }
+        }
+        if (landedOn < 0 && !rope.on && !dropping &&
+            py0 + RADIUS <= L.baseY + 1 && p.y + RADIUS >= L.baseY) {
+          p.y = L.baseY - RADIUS; p.vy = 0; p.grounded = true; p.airJumps = 1;
+          landedOn = li;
+        }
+      }
+    }
+    // landing on a neighbouring map makes it the current one
+    if (landedOn === 2) shiftDown();
+    else if (landedOn === 0) shiftUp();
+    // and keep a map on each side even if you never touch one
+    else if (p.y > levels[2].baseY + 200) shiftDown();
+    else if (p.y < levels[0].baseY - MAX_H - 600) shiftUp();
+
+    // standing in a doorway long enough carries you to the other side. The
+    // door you arrive in is locked until you step off it, or you would loop.
+    if (onDoor) {
+      if (!doorLock) {
+        doorT += dt;
+        if (doorT >= DOOR_HOLD) { crossOver(); return; }
+      }
+    } else {
+      doorT = 0;
+      doorLock = false;
+    }
+
+    // a spent air jump comes back on its own, with a blink to announce it
+    if (p.airJumps <= 0) {
+      p.rechargeT += dt;
+      if (p.rechargeT >= RECHARGE) { p.airJumps = 1; p.rechargeT = 0; p.blinkT = 0.7; }
+    }
+    if (p.blinkT > 0) p.blinkT -= dt;
+
+    stats.far = Math.max(stats.far, (p.x - stats.startX) / PPM);
+    var altNow = (GROUND_Y - p.y) / PPM;
+    if (altNow > stats.high) stats.high = altNow;
+    if (altNow < stats.low) stats.low = altNow;
+  }
+
+  // ---- camera ----
+  function updateCamera(dt) {
+    // travel at a fixed rate, then smoothstep it, so the zoom eases in and out
+    // of both ends instead of lurching away and crawling in
+    var target = started ? 0 : 1;
+    var rate = dt / INTRO_TIME;
+    if (introP < target) introP = Math.min(target, introP + rate);
+    else if (introP > target) introP = Math.max(target, introP - rate);
+    var s = introP * introP * (3 - 2 * introP);
+    cam.zoom = clamp(Math.min(W / 1400, H / 820), 0.4, 1.1) * (1 + (INTRO_ZOOM - 1) * s);
+    cam.lead = lerp(cam.lead, player.vx, 1 - Math.pow(0.02, dt));
+    var tx = drawX + cam.lead * 0.2;
+
+    // ease the lowest point the camera will look at, rather than switching it
+    var base = levels[1].baseY;
+    var rawLimit = (rope.on || drawY > base - 60) ? base + LEVEL_GAP : base + 120;
+    cam.limitV = lerp(cam.limitV, rawLimit, 1 - Math.pow(0.05, dt));
+    var ty = Math.min(drawY - 40, cam.limitV - (H / 2) / cam.zoom);
+
+    cam.x = lerp(cam.x, tx, 1 - Math.pow(0.0015, dt));
+    cam.y = lerp(cam.y, ty, 1 - Math.pow(0.004, dt));
+  }
+  function screenToWorld(sx, sy) {
+    return { x: (sx - W / 2) / cam.zoom + cam.x, y: (sy - H / 2) / cam.zoom + cam.y };
+  }
+
+  // ---- render ----
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = theme.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.translate(W / 2, H / 2);
+    ctx.scale(cam.zoom, cam.zoom);
+    ctx.translate(-cam.x, -cam.y);
+
+    var halfW = (W / 2) / cam.zoom;
+    var left = cam.x - halfW - 200, right = cam.x + halfW + 200;
+
+    for (var li = 0; li < levels.length; li++) {
+      var L = levels[li];
+      growLevel(L, right + 900);
+      trimLevel(L, left - 1400);
+
+      ctx.lineWidth = 2;
+      for (var i = 0; i < L.items.length; i++) {
+        var b = L.items[i];
+        if (b.x + b.w < left || b.x > right) continue;
+        ctx.fillStyle = theme.fill;
+        ctx.fillRect(b.x, b.top, b.w, L.baseY - b.top);
+        ctx.strokeStyle = theme.edge;
+        ctx.strokeRect(b.x, b.top, b.w, L.baseY - b.top);
+
+        if (b.door) {
+          var dx0 = b.x + b.w / 2 - 17;
+          ctx.fillStyle = theme.bg;
+          ctx.fillRect(dx0, b.top - 46, 34, 46);
+          ctx.strokeStyle = theme.ink;
+          ctx.lineWidth = 2;
+          ctx.strokeRect(dx0, b.top - 46, 34, 46);
+          ctx.fillStyle = theme.ink;
+          ctx.fillRect(dx0 + 26, b.top - 25, 4, 4);
+          ctx.lineWidth = 2;
+        }
+      }
+
+      // street: same value as the sky, marked only by a solid edge
+      ctx.strokeStyle = theme.ink;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(left - 200, L.baseY);
+      ctx.lineTo(right + 200, L.baseY);
+      ctx.stroke();
+    }
+
+    if (rope.on) {
+      ctx.strokeStyle = theme.rope;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(drawX, drawY);
+      ctx.lineTo(rope.x, rope.y);
+      ctx.stroke();
+      ctx.fillStyle = theme.rope;
+      ctx.fillRect(rope.x - 3, rope.y - 3, 6, 6);
+    }
+
+    // the ring left behind by an air jump
+    for (var pi = 0; pi < puffs.length; pi++) {
+      var q = puffs[pi];
+      var k = q.t / q.life;
+      ctx.globalAlpha = 1 - k;
+      ctx.strokeStyle = theme.ink;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, RADIUS + k * 30, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // Fill carries the air jump (solid = ready, empty = spent), outline goes
+    // white while S is held. Those two together used to be a white fill under
+    // a white outline — invisible — so a spent jump keeps a tinted body while
+    // dropping, and a chevron under the dot marks drop mode either way.
+    var full = player.airJumps > 0;
+    if (player.blinkT > 0) full = Math.floor(player.blinkT * 12) % 2 === 0;
+    var dropping = !!keys.s;
+
+    ctx.fillStyle = dropping
+      ? (full ? theme.dot : theme.drop)
+      : (full ? theme.dot : theme.bg);
+    ctx.beginPath();
+    ctx.arc(drawX, drawY, RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = dropping ? theme.dropEdge : (full ? theme.dotEdge : theme.dot);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // each readout is clickable: clicking pins it to the bottom right in large
+  // type, clicking the pinned one again unpins it
+  var STATS = [
+    { k: "dist",   get: function () { return Math.round(player.x - stats.startX) + "px"; } },
+    { k: "speed",  get: function () { return Math.round(Math.hypot(player.vx, player.vy)) + "px/s"; } },
+    { k: "height", get: function () { return Math.round(GROUND_Y - player.y) + "px"; } },
+    { k: "depth",  get: function () { return String(Math.round((GROUND_Y - levels[1].baseY) / LEVEL_GAP)); } }
+  ];
+  var pinned = null;
+  var statEls = [];
+
+  function buildHud() {
+    elHud.textContent = "";
+    STATS.forEach(function (s, i) {
+      if (i) elHud.appendChild(document.createTextNode(", "));
+      var el = document.createElement("span");
+      el.className = "stat";
+      el.addEventListener("click", function () {
+        pinned = pinned === s.k ? null : s.k;
+        statEls.forEach(function (e, j) {
+          e.classList.toggle("pinned", STATS[j].k === pinned);
+        });
+        elBig.hidden = !pinned;
+        elBigK.textContent = pinned || "";
+      });
+      elHud.appendChild(el);
+      statEls.push(el);
+    });
+  }
+
+  function hud() {
+    for (var i = 0; i < STATS.length; i++) {
+      var v = STATS[i].get();
+      statEls[i].textContent = STATS[i].k + " " + v;
+      if (pinned === STATS[i].k) elBigV.textContent = v;
+    }
+  }
+
+  // ---- loop ----
+  var last = performance.now(), acc = 0, FIXED = 1 / 180;
+  function frame(now) {
+    var dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (frozen) {
+      acc = 0;
+      drawX = player.x; drawY = player.y;
+    } else {
+      acc += dt;
+      var guard = 0;
+      while (acc >= FIXED && guard < 20 && !frozen) { step(FIXED); acc -= FIXED; guard++; }
+      if (guard >= 20) acc = 0;
+      var a = clamp(acc / FIXED, 0, 1);
+      drawX = lerp(player.rx, player.x, a);
+      drawY = lerp(player.ry, player.y, a);
+
+      // sitting still with nothing held for long enough brings the title back
+      if (started) {
+        var holding = pointer.down || keys[" "] || keys.a || keys.d || keys.s || keys.w ||
+                      keys.arrowleft || keys.arrowright || keys.arrowup || keys.arrowdown;
+        if (holding || Math.hypot(player.vx, player.vy) > 12) idleT = 0;        else {
+          idleT += dt;
+          if (idleT >= IDLE_BACK) returnToIntro();
+        }
+      }
+
+      updateCamera(dt);
+    }
+
+    elAch.hidden = !frozen;
+
+    for (var i = puffs.length - 1; i >= 0; i--) {
+      puffs[i].t += dt;
+      if (puffs[i].t >= puffs[i].life) puffs.splice(i, 1);
+    }
+
+    render();
+    hud();
+    requestAnimationFrame(frame);
+  }
+
+  // ---- input ----
+  window.addEventListener("keydown", function (e) {
+    var k = e.key.toLowerCase();
+    if (k === " " || k.indexOf("arrow") === 0) e.preventDefault();
+    if (e.repeat) return;
+    keys[k] = true;
+    if (k === "r") { reset(); return; }
+    beginPlay();
+    if (k === " ") jumpPressed();
+  });
+  window.addEventListener("keyup", function (e) { keys[e.key.toLowerCase()] = false; });
+  window.addEventListener("blur", function () { pointer.down = false; keys = Object.create(null); });
+
+  cv.addEventListener("pointerdown", function (e) {
+    cv.setPointerCapture(e.pointerId);
+    pointer.down = true; pointer.x = e.clientX; pointer.y = e.clientY;
+    lockGrapple = false;
+    beginPlay();
+    tryGrapple();
+  });
+  cv.addEventListener("pointermove", function (e) { pointer.x = e.clientX; pointer.y = e.clientY; });
+  function up() { pointer.down = false; lockGrapple = false; release(); }
+  cv.addEventListener("pointerup", up);
+  cv.addEventListener("pointercancel", up);
+
+  resize();
+  reset();
+  buildHud();
+  requestAnimationFrame(frame);
+})();
+</script>
