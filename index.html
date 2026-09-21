@@ -6,7 +6,7 @@
 <meta name="darkreader-lock">
 </head>
 <body>
-<title>jump game!</title>
+<title>spider-ball</title>
 <style>
   :root{
     --bg:#f2f2f0;
@@ -76,7 +76,7 @@
 </style>
 
 <canvas id="game"></canvas>
-<div id="title"><b>jump game!</b><small id="tip">press space to jump</small></div>
+<div id="title"><b>spider-ball</b><small id="tip">press space to jump</small></div>
 <div id="big" hidden><span class="k" id="bigK"></span><span class="v" id="bigV"></span></div>
 <div id="hud">dist 0m</div>
 <div id="ach" hidden><b>achievement unlocked: backrooms</b><small>R to restart</small></div>
@@ -151,6 +151,7 @@
   var LEVEL_GAP = 2400;
   var GRAV = 1500;
   var MAX_ROPE = 660, MIN_ROPE = 55;
+  var SHORT_ROPE = 100;        // reeled in this tight, rooftops catch you again
   var PPM = 12;
   var RADIUS = 9;
   var JUMP = 700;
@@ -617,13 +618,20 @@
   // above — otherwise rising past a rooftop would refund the jump budget.
   function surfaceBelow() {
     var p = player;
-    if (p.vy < 0 || rope.on) return false;
-    // mirror the landing rules: roofs open only at speed, streets also when
-    // the double jump is spent, and bracing closes both again
+    if (p.vy < 0) return false;
+    // mirror the landing rules: on a line nothing catches you unless the line
+    // is reeled in short, when the rooftops come back; otherwise roofs open at
+    // speed, the ground needs speed and a spent jump, and bracing closes both
     var braced = !!keys[" "];
     var fast = Math.hypot(p.vx, p.vy) > PHASE_SPEED;
-    var roofOK = braced || !fast;
-    var streetOK = braced || p.jumps < MAX_JUMPS;
+    var roofOK, streetOK;
+    if (rope.on) {
+      roofOK = rope.len < SHORT_ROPE;
+      streetOK = false;
+    } else {
+      roofOK = braced || !fast;
+      streetOK = braced || !(p.jumps >= MAX_JUMPS && fast);
+    }
     for (var li = 0; li < levels.length; li++) {
       var L = levels[li];
       if (roofOK) {
@@ -772,10 +780,10 @@
     // moment the jump recharges. The one exception is a lost rope, which keeps
     // everything solid so you can land and go and fetch it.
     // Rooftops and streets are treated separately. On a line you pass through
-    // both — the swing owns your movement. The ground opens only for a spent
-    // double jump, never for speed: a single level of falling puts you well
-    // past any speed threshold, so letting speed open it too would mean one
-    // phase could never be recovered from. Speed opens the rooftops alone.
+    // both — the swing owns your movement. Speed alone opens the rooftops; the
+    // ground needs speed AND a spent double jump together, so it never opens
+    // by accident. The jump recharging always closes it again, which is what
+    // stops a long fall from carrying on for ever.
     var landedOn = -1;
     var onDoor = false;
     var braced = !!keys[" "];
@@ -783,9 +791,9 @@
     var fast = Math.hypot(p.vx, p.vy) > PHASE_SPEED;
     var hollow = p.jumps >= MAX_JUMPS;
     var roofSolid, streetSolid;
-    if (rope.on) { roofSolid = false; streetSolid = false; }
+    if (rope.on) { roofSolid = rope.len < SHORT_ROPE; streetSolid = false; }
     else if (braced || recovering) { roofSolid = true; streetSolid = true; }
-    else { roofSolid = !fast; streetSolid = !hollow; }
+    else { roofSolid = !fast; streetSolid = !(hollow && fast); }
 
     if (p.vy > 0 && (roofSolid || streetSolid)) {
       for (var li = 0; li < levels.length && landedOn < 0; li++) {
